@@ -17,6 +17,7 @@ const App = () => {
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [typingUsers, setTypingUsers] = useState(new Set());
   const [isTyping, setIsTyping] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(false);
   
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -255,7 +256,9 @@ const App = () => {
       if (res.ok) {
         const messagesData = await res.json();
         setMessages(messagesData);
-        setSelectedUser(users.find(user => user.id === userId));
+        const user = users.find(user => user.id === userId);
+        setSelectedUser(user);
+        setShowSidebar(false); // Close sidebar on mobile when selecting a chat
         messageInputRef.current?.focus();
       } else {
         throw new Error('Failed to load messages');
@@ -337,6 +340,24 @@ const App = () => {
     }
   };
 
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    setCurrentUser(null);
+    setSelectedUser(null);
+    setMessages([]);
+    socketRef.current?.disconnect();
+  };
+
+  const toggleSidebar = () => {
+    setShowSidebar(!showSidebar);
+  };
+
+  const handleBackToContacts = () => {
+    setSelectedUser(null);
+    setMessages([]);
+    setShowSidebar(true);
+  };
+
   if (!currentUser) {
     return (
       <div className="app auth-container">
@@ -416,8 +437,8 @@ const App = () => {
 
   return (
     <div className="app">
-      {/* Sidebar */}
-      <div className="sidebar">
+      {/* Sidebar for Contacts */}
+      <div className={`sidebar ${showSidebar ? 'active' : ''}`}>
         <div className="sidebar-header">
           <div className="user-profile">
             <div className="avatar">
@@ -438,11 +459,7 @@ const App = () => {
           </div>
           <button 
             className="logout-btn"
-            onClick={() => {
-              localStorage.removeItem('token');
-              setCurrentUser(null);
-              socketRef.current?.disconnect();
-            }}
+            onClick={handleLogout}
             title="Logout"
           >
             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
@@ -498,7 +515,18 @@ const App = () => {
       <div className="chat-area">
         {selectedUser ? (
           <>
+            {/* Mobile Navigation Bar */}
             <div className="chat-header">
+              <button 
+                className="back-btn"
+                onClick={handleBackToContacts}
+                title="Back to contacts"
+              >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
+                </svg>
+              </button>
+              
               <div className="chat-user">
                 <div className="chat-user-avatar">
                   {selectedUser.username?.charAt(0).toUpperCase()}
@@ -515,6 +543,16 @@ const App = () => {
                   </span>
                 </div>
               </div>
+
+              <button 
+                className="menu-btn"
+                onClick={toggleSidebar}
+                title="Menu"
+              >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/>
+                </svg>
+              </button>
             </div>
 
             <div className="messages-container">
@@ -571,11 +609,10 @@ const App = () => {
                   onKeyPress={handleKeyPress}
                   placeholder="Type a message..."
                   className="message-input"
-                  disabled={!selectedUser}
                 />
                 <button
                   onClick={sendMessage}
-                  disabled={!newMessage.trim() || !selectedUser}
+                  disabled={!newMessage.trim()}
                   className="send-btn"
                   title="Send message"
                 >
@@ -587,24 +624,87 @@ const App = () => {
             </div>
           </>
         ) : (
-          <div className="no-chat-selected">
-            <div className="welcome-illustration">
-              <svg width="200" height="200" viewBox="0 0 24 24" fill="#0084ff">
-                <path d="M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 9h12v2H6V9zm8 5H6v-2h8v2zm4-6H6V6h12v2z"/>
-              </svg>
+          <>
+            {/* Mobile Navigation Bar for Contacts View */}
+            <div className="chat-header">
+              <div className="user-profile">
+                <div className="avatar">
+                  {currentUser.username?.charAt(0).toUpperCase()}
+                </div>
+                <div className="user-info">
+                  <span className="username">{currentUser.username}</span>
+                  <div className="connection-status">
+                    <span 
+                      className="status-dot"
+                      style={{ backgroundColor: getConnectionStatusColor() }}
+                    ></span>
+                    <span className="status-text">
+                      {connectionStatus.charAt(0).toUpperCase() + connectionStatus.slice(1)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="header-actions">
+                <button 
+                  className="refresh-btn"
+                  onClick={loadUsers}
+                  title="Refresh contacts"
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+                  </svg>
+                </button>
+                
+                <button 
+                  className="logout-btn"
+                  onClick={handleLogout}
+                  title="Logout"
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/>
+                  </svg>
+                </button>
+              </div>
             </div>
-            <h2>Welcome to VSChats</h2>
-            <p>Select a conversation to start messaging</p>
-            <div className="connection-info">
-              <span 
-                className="status-dot"
-                style={{ backgroundColor: getConnectionStatusColor() }}
-              ></span>
-              Server: {connectionStatus}
+
+            <div className="no-chat-selected">
+              <div className="welcome-illustration">
+                <svg width="150" height="150" viewBox="0 0 24 24" fill="#0084ff">
+                  <path d="M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 9h12v2H6V9zm8 5H6v-2h8v2zm4-6H6V6h12v2z"/>
+                </svg>
+              </div>
+              <h2>Welcome to VSChats</h2>
+              <p>Select a conversation to start messaging</p>
+              <div className="connection-info">
+                <span 
+                  className="status-dot"
+                  style={{ backgroundColor: getConnectionStatusColor() }}
+                ></span>
+                Server: {connectionStatus}
+              </div>
+              
+              <button 
+                className="new-chat-btn"
+                onClick={toggleSidebar}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+                </svg>
+                Start New Chat
+              </button>
             </div>
-          </div>
+          </>
         )}
       </div>
+
+      {/* Overlay for mobile sidebar */}
+      {showSidebar && (
+        <div 
+          className="sidebar-overlay"
+          onClick={() => setShowSidebar(false)}
+        />
+      )}
     </div>
   );
 };
