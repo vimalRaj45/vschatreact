@@ -3,18 +3,18 @@
   "name": "VS Chats",
   "icons": [
     {
-      "src": "logo.svg",
+      "src": "vs chats.jpg",
       "sizes": "any",
-      "type": "image/svg+xml"
+      "type": "image/jpeg"
     },
     {
-      "src": "icon-192x192.png",
-      "type": "image/png",
+      "src": "vs chats.jpg",
+      "type": "image/jpeg",
       "sizes": "192x192"
     },
     {
-      "src": "icon-512x512.png",
-      "type": "image/png",
+      "src": "vs chats.jpg",
+      "type": "image/jpeg",
       "sizes": "512x512"
     }
   ],
