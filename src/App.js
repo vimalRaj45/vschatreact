@@ -18,24 +18,59 @@ const App = () => {
   const [typingUsers, setTypingUsers] = useState(new Set());
   const [isTyping, setIsTyping] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
+  const [appLoading, setAppLoading] = useState(true);
+  const [autoLoginAttempted, setAutoLoginAttempted] = useState(false);
   
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
   const messageInputRef = useRef(null);
   const typingTimeoutRef = useRef(null);
 
-  // Check for existing token on app start
+  // Check for existing token on app start with better error handling
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (token) {
-      validateToken(token);
-    }
-    
+    const initializeApp = async () => {
+      try {
+        const token = localStorage.getItem('token');
+        const userData = localStorage.getItem('userData');
+        
+        if (token && userData) {
+          // Try to validate token with server
+          const isValid = await validateToken(token);
+          if (isValid) {
+            // Use stored user data immediately for better UX
+            const parsedUserData = JSON.parse(userData);
+            setCurrentUser(parsedUserData);
+            initializeSocket(token);
+            loadUsers();
+          } else {
+            // Clear invalid data
+            clearAuthData();
+          }
+        }
+      } catch (error) {
+        console.error('App initialization failed:', error);
+        clearAuthData();
+      } finally {
+        setAppLoading(false);
+        setAutoLoginAttempted(true);
+      }
+    };
+
+    initializeApp();
+
     // Request notification permission
     if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
+      Notification.requestPermission().then(permission => {
+        console.log('Notification permission:', permission);
+      });
     }
   }, []);
+
+  const clearAuthData = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('userData');
+    setCurrentUser(null);
+  };
 
   const validateToken = async (token) => {
     try {
@@ -45,15 +80,15 @@ const App = () => {
       
       if (res.ok) {
         const userData = await res.json();
-        setCurrentUser(userData);
-        initializeSocket(token);
-        loadUsers();
+        // Update stored user data
+        localStorage.setItem('userData', JSON.stringify(userData));
+        return true;
       } else {
-        localStorage.removeItem('token');
+        return false;
       }
     } catch (error) {
       console.error('Token validation failed:', error);
-      localStorage.removeItem('token');
+      return false;
     }
   };
 
@@ -65,6 +100,15 @@ const App = () => {
   useEffect(() => {
     scrollToBottom();
   }, [messages, typingUsers]);
+
+  // Auto-focus message input when selecting a user
+  useEffect(() => {
+    if (selectedUser) {
+      setTimeout(() => {
+        messageInputRef.current?.focus();
+      }, 100);
+    }
+  }, [selectedUser]);
 
   // Typing indicators
   const handleTypingStart = () => {
@@ -88,16 +132,27 @@ const App = () => {
     clearTimeout(typingTimeoutRef.current);
   };
 
-  // Authentication handlers
+  // Enhanced authentication handlers
   const handleAuth = async (e) => {
     e.preventDefault();
     const formData = new FormData(e.target);
-    const email = formData.get('email');
+    const email = formData.get('email').trim();
     const password = formData.get('password');
-    const username = formData.get('username');
+    const username = formData.get('username')?.trim();
 
     if (!email || !password || (!isLogin && !username)) {
       alert('Please fill all fields');
+      return;
+    }
+
+    // Basic validation
+    if (!isLogin && username && username.length < 3) {
+      alert('Username must be at least 3 characters long');
+      return;
+    }
+
+    if (password.length < 6) {
+      alert('Password must be at least 6 characters long');
       return;
     }
 
@@ -111,34 +166,45 @@ const App = () => {
       });
       
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      if (!res.ok) throw new Error(data.error || 'Authentication failed');
 
       if (isLogin) {
+        // Store authentication data
         localStorage.setItem('token', data.token);
+        localStorage.setItem('userData', JSON.stringify(data.user));
+        
         setCurrentUser(data.user);
         initializeSocket(data.token);
         initializePushNotifications(data);
         loadUsers();
+        
+        // Show welcome message
+        setTimeout(() => {
+          alert(`Welcome back, ${data.user.username}!`);
+        }, 100);
       } else {
-        alert('Registration successful! Please login.');
+        alert('Registration successful! Please login with your credentials.');
         setIsLogin(true);
         // Clear form
         e.target.reset();
       }
     } catch (err) {
-      alert(err.message || 'Operation failed');
+      alert(err.message || 'Operation failed. Please try again.');
     } finally {
       setLoading(false);
     }
   };
 
-  // Socket initialization
+  // Enhanced Socket initialization with reconnection logic
   const initializeSocket = (token) => {
     setConnectionStatus('connecting');
     
     socketRef.current = io(BACKEND_URL, {
       auth: { token },
-      transports: ['websocket', 'polling']
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
     });
 
     socketRef.current.on('connect', () => {
@@ -146,13 +212,28 @@ const App = () => {
       console.log('Connected to server');
     });
 
-    socketRef.current.on('disconnect', () => {
+    socketRef.current.on('disconnect', (reason) => {
       setConnectionStatus('disconnected');
+      console.log('Disconnected from server:', reason);
+      
+      // Auto-reconnect for certain disconnect reasons
+      if (reason === 'io server disconnect') {
+        socketRef.current.connect();
+      }
     });
 
     socketRef.current.on('connect_error', (error) => {
       setConnectionStatus('error');
       console.error('Connection error:', error);
+    });
+
+    socketRef.current.on('reconnect_attempt', (attempt) => {
+      setConnectionStatus(`reconnecting (${attempt}/5)`);
+    });
+
+    socketRef.current.on('reconnect_failed', () => {
+      setConnectionStatus('failed');
+      alert('Unable to connect to server. Please check your internet connection.');
     });
 
     socketRef.current.on('message', (message) => {
@@ -161,8 +242,9 @@ const App = () => {
       // Show notification for new messages when app is in background
       if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
         new Notification(`New message from ${selectedUser?.username || 'Someone'}`, {
-          body: message.content,
-          icon: '/favicon.ico'
+          body: message.content.length > 50 ? message.content.substring(0, 50) + '...' : message.content,
+          icon: '/favicon.ico',
+          tag: 'new-message'
         });
       }
     });
@@ -197,7 +279,8 @@ const App = () => {
     });
 
     socketRef.current.on('error', (err) => {
-      alert(err.message);
+      console.error('Socket error:', err);
+      alert(err.message || 'A connection error occurred');
     });
   };
 
@@ -225,10 +308,15 @@ const App = () => {
     }
   };
 
-  // Load users list
+  // Load users list with better error handling
   const loadUsers = async () => {
     try {
       const token = localStorage.getItem('token');
+      if (!token) {
+        handleLogout();
+        return;
+      }
+
       const res = await fetch(`${BACKEND_URL}/api/users`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
@@ -236,12 +324,18 @@ const App = () => {
       if (res.ok) {
         const usersData = await res.json();
         setUsers(usersData);
+      } else if (res.status === 401) {
+        // Token expired
+        handleLogout();
+        alert('Your session has expired. Please login again.');
       } else {
         throw new Error('Failed to load users');
       }
     } catch (error) {
       console.error('Failed to load users:', error);
-      alert('Failed to load users. Please try again.');
+      if (error.message !== 'Failed to load users') {
+        alert('Failed to load users. Please check your connection and try again.');
+      }
     }
   };
 
@@ -259,7 +353,9 @@ const App = () => {
         const user = users.find(user => user.id === userId);
         setSelectedUser(user);
         setShowSidebar(false); // Close sidebar on mobile when selecting a chat
-        messageInputRef.current?.focus();
+      } else if (res.status === 401) {
+        handleLogout();
+        alert('Your session has expired. Please login again.');
       } else {
         throw new Error('Failed to load messages');
       }
@@ -269,18 +365,13 @@ const App = () => {
     }
   };
 
-  // Send message
-  const sendMessage = () => {
+  // Enhanced send message with better error handling
+  const sendMessage = async () => {
     const content = newMessage.trim();
     if (!content || !selectedUser || !socketRef.current) return;
 
     // Stop typing indicator
     handleTypingStop();
-
-    socketRef.current.emit('send_message', {
-      receiverId: selectedUser.id,
-      content
-    });
 
     // Optimistically add message to UI
     const optimisticMessage = {
@@ -288,12 +379,24 @@ const App = () => {
       content,
       sender_id: currentUser.id,
       created_at: new Date().toISOString(),
-      isOwn: true
+      isOwn: true,
+      pending: true
     };
     
     setMessages(prev => [...prev, optimisticMessage]);
     setNewMessage('');
-    messageInputRef.current?.focus();
+
+    try {
+      socketRef.current.emit('send_message', {
+        receiverId: selectedUser.id,
+        content
+      });
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      // Remove optimistic message on error
+      setMessages(prev => prev.filter(msg => msg.id !== optimisticMessage.id));
+      alert('Failed to send message. Please try again.');
+    }
   };
 
   const handleKeyPress = (e) => {
@@ -326,6 +429,8 @@ const App = () => {
     
     if (diffInHours < 24) {
       return formatTime(dateString);
+    } else if (diffInHours < 48) {
+      return 'Yesterday ' + formatTime(dateString);
     } else {
       return date.toLocaleDateString() + ' ' + formatTime(dateString);
     }
@@ -336,16 +441,21 @@ const App = () => {
       case 'connected': return '#00b300';
       case 'connecting': return '#ffa500';
       case 'error': return '#ff4444';
+      case 'reconnecting': return '#ffa500';
       default: return '#65676b';
     }
   };
 
   const handleLogout = () => {
-    localStorage.removeItem('token');
-    setCurrentUser(null);
-    setSelectedUser(null);
-    setMessages([]);
-    socketRef.current?.disconnect();
+    if (window.confirm('Are you sure you want to logout?')) {
+      clearAuthData();
+      setCurrentUser(null);
+      setSelectedUser(null);
+      setMessages([]);
+      setUsers([]);
+      socketRef.current?.disconnect();
+      alert('You have been logged out successfully.');
+    }
   };
 
   const toggleSidebar = () => {
@@ -357,6 +467,19 @@ const App = () => {
     setMessages([]);
     setShowSidebar(true);
   };
+
+  // Show loading screen while checking authentication
+  if (appLoading) {
+    return (
+      <div className="app loading-container">
+        <div className="loading-content">
+          <div className="loading-spinner"></div>
+          <h2>VSChats</h2>
+          <p>Loading...</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!currentUser) {
     return (
@@ -377,9 +500,10 @@ const App = () => {
                 <input
                   type="text"
                   name="username"
-                  placeholder="Username"
+                  placeholder="Username (min. 3 characters)"
                   className="form-input"
                   required
+                  minLength="3"
                 />
               </div>
             )}
@@ -398,7 +522,7 @@ const App = () => {
               <input
                 type="password"
                 name="password"
-                placeholder="Password"
+                placeholder="Password (min. 6 characters)"
                 className="form-input"
                 required
                 minLength="6"
@@ -425,11 +549,25 @@ const App = () => {
                 type="button" 
                 className="switch-btn"
                 onClick={() => setIsLogin(!isLogin)}
+                disabled={loading}
               >
                 {isLogin ? 'Sign Up' : 'Sign In'}
               </button>
             </p>
           </div>
+
+          {autoLoginAttempted && (
+            <div className="auth-features">
+              <h4>Features:</h4>
+              <ul>
+                <li>🔐 Auto-login on return</li>
+                <li>💬 Real-time messaging</li>
+                <li>👥 Online status</li>
+                <li>📱 Mobile friendly</li>
+                <li>🔔 Push notifications</li>
+              </ul>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -470,7 +608,7 @@ const App = () => {
 
         <div className="users-section">
           <div className="section-header">
-            <h3 className="section-title">Contacts</h3>
+            <h3 className="section-title">Contacts ({users.length})</h3>
             <button 
               className="refresh-btn"
               onClick={loadUsers}
@@ -482,31 +620,40 @@ const App = () => {
             </button>
           </div>
           <div className="users-list">
-            {users.map(user => (
-              <div
-                key={user.id}
-                className={`user-item ${selectedUser?.id === user.id ? 'selected' : ''}`}
-                onClick={() => loadMessages(user.id)}
-              >
-                <div className="user-avatar">
-                  {user.username?.charAt(0).toUpperCase()}
-                  {onlineUsers.has(user.id) && <span className="online-dot"></span>}
-                </div>
-                <div className="user-details">
-                  <span className="user-name">{user.username}</span>
-                  <span className="user-status">
-                    {onlineUsers.has(user.id) ? 'Online' : 'Offline'}
-                  </span>
-                </div>
-                {typingUsers.has(user.id) && (
-                  <div className="typing-indicator">
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                  </div>
-                )}
+            {users.length === 0 ? (
+              <div className="no-users">
+                <p>No contacts found</p>
+                <button onClick={loadUsers} className="retry-btn">
+                  Try Again
+                </button>
               </div>
-            ))}
+            ) : (
+              users.map(user => (
+                <div
+                  key={user.id}
+                  className={`user-item ${selectedUser?.id === user.id ? 'selected' : ''}`}
+                  onClick={() => loadMessages(user.id)}
+                >
+                  <div className="user-avatar">
+                    {user.username?.charAt(0).toUpperCase()}
+                    {onlineUsers.has(user.id) && <span className="online-dot"></span>}
+                  </div>
+                  <div className="user-details">
+                    <span className="user-name">{user.username}</span>
+                    <span className="user-status">
+                      {onlineUsers.has(user.id) ? 'Online' : 'Offline'}
+                    </span>
+                  </div>
+                  {typingUsers.has(user.id) && (
+                    <div className="typing-indicator">
+                      <span></span>
+                      <span></span>
+                      <span></span>
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
           </div>
         </div>
       </div>
@@ -565,7 +712,7 @@ const App = () => {
                       </svg>
                     </div>
                     <h3>No messages yet</h3>
-                    <p>Start a conversation by sending a message</p>
+                    <p>Start a conversation by sending a message below</p>
                   </div>
                 ) : (
                   messages.map((message, index) => {
@@ -576,7 +723,7 @@ const App = () => {
                     return (
                       <div
                         key={message.id || index}
-                        className={`message ${isOwn ? 'own' : 'other'} ${showAvatar ? 'with-avatar' : ''}`}
+                        className={`message ${isOwn ? 'own' : 'other'} ${showAvatar ? 'with-avatar' : ''} ${message.pending ? 'pending' : ''}`}
                       >
                         {!isOwn && showAvatar && (
                           <div className="message-avatar">
@@ -586,6 +733,9 @@ const App = () => {
                         <div className="message-content">
                           <div className="message-bubble">
                             {message.content}
+                            {message.pending && (
+                              <span className="pending-indicator">⏳</span>
+                            )}
                           </div>
                           <div className="message-time">
                             {formatMessageTime(message.created_at)}
@@ -607,20 +757,26 @@ const App = () => {
                   value={newMessage}
                   onChange={handleInputChange}
                   onKeyPress={handleKeyPress}
-                  placeholder="Type a message..."
+                  placeholder="Type a message... (Press Enter to send)"
                   className="message-input"
+                  disabled={connectionStatus !== 'connected'}
                 />
                 <button
                   onClick={sendMessage}
-                  disabled={!newMessage.trim()}
+                  disabled={!newMessage.trim() || connectionStatus !== 'connected'}
                   className="send-btn"
-                  title="Send message"
+                  title={connectionStatus === 'connected' ? "Send message" : "Connecting..."}
                 >
                   <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
                   </svg>
                 </button>
               </div>
+              {connectionStatus !== 'connected' && (
+                <div className="connection-warning">
+                  ⚠️ {connectionStatus === 'connecting' ? 'Connecting to server...' : 'Connection lost. Trying to reconnect...'}
+                </div>
+              )}
             </div>
           </>
         ) : (
@@ -674,8 +830,8 @@ const App = () => {
                   <path d="M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 9h12v2H6V9zm8 5H6v-2h8v2zm4-6H6V6h12v2z"/>
                 </svg>
               </div>
-              <h2>Welcome to VSChats</h2>
-              <p>Select a conversation to start messaging</p>
+              <h2>Welcome to VSChats, {currentUser.username}! 👋</h2>
+              <p>Select a conversation from the sidebar to start messaging</p>
               <div className="connection-info">
                 <span 
                   className="status-dot"
@@ -684,15 +840,27 @@ const App = () => {
                 Server: {connectionStatus}
               </div>
               
-              <button 
-                className="new-chat-btn"
-                onClick={toggleSidebar}
-              >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
-                </svg>
-                Start New Chat
-              </button>
+              <div className="welcome-actions">
+                <button 
+                  className="new-chat-btn"
+                  onClick={toggleSidebar}
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+                  </svg>
+                  Browse Contacts
+                </button>
+                
+                <button 
+                  className="refresh-btn large"
+                  onClick={loadUsers}
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+                  </svg>
+                  Refresh Contacts
+                </button>
+              </div>
             </div>
           </>
         )}
