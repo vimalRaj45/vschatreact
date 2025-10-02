@@ -34,25 +34,35 @@ const App = () => {
         const userData = localStorage.getItem('userData');
         
         if (token && userData) {
-          // Try to validate token with server
-          const isValid = await validateToken(token);
-          if (isValid) {
-            // Use stored user data immediately for better UX
-            const parsedUserData = JSON.parse(userData);
-            setCurrentUser(parsedUserData);
+          // Use stored user data immediately for better UX
+          const parsedUserData = JSON.parse(userData);
+          setCurrentUser(parsedUserData);
+          
+          // Try to validate token with server in background
+          validateToken(token).then(isValid => {
+            if (!isValid) {
+              console.log('Token validation failed, clearing stored data');
+              clearAuthData();
+            } else {
+              initializeSocket(token);
+              loadUsers();
+            }
+          }).catch(error => {
+            console.error('Token validation error:', error);
+            // Continue with stored data anyway for offline capability
             initializeSocket(token);
             loadUsers();
-          } else {
-            // Clear invalid data
-            clearAuthData();
-          }
+          });
+        } else {
+          setAppLoading(false);
         }
       } catch (error) {
         console.error('App initialization failed:', error);
         clearAuthData();
       } finally {
-        setAppLoading(false);
         setAutoLoginAttempted(true);
+        // Set app loading to false after a minimum delay for better UX
+        setTimeout(() => setAppLoading(false), 500);
       }
     };
 
@@ -75,19 +85,37 @@ const App = () => {
   const validateToken = async (token) => {
     try {
       const res = await fetch(`${BACKEND_URL}/api/validate`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
       });
+      
+      // Check if response is JSON
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        console.error('Server returned non-JSON response');
+        return false;
+      }
       
       if (res.ok) {
         const userData = await res.json();
         // Update stored user data
         localStorage.setItem('userData', JSON.stringify(userData));
+        setCurrentUser(userData);
         return true;
       } else {
+        console.log('Token validation failed with status:', res.status);
         return false;
       }
     } catch (error) {
       console.error('Token validation failed:', error);
+      // If it's a network error, we'll assume the token might still be valid
+      // and let the socket connection handle authentication
+      if (error.name === 'TypeError' && error.message.includes('JSON')) {
+        console.log('Server might be down, continuing with stored token');
+        return true; // Continue with stored token for offline capability
+      }
       return false;
     }
   };
@@ -164,6 +192,14 @@ const App = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(isLogin ? { email, password } : { username, email, password })
       });
+
+      // Check if response is JSON
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await res.text();
+        console.error('Server returned non-JSON response:', text.substring(0, 200));
+        throw new Error('Server error. Please try again later.');
+      }
       
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Authentication failed');
@@ -195,93 +231,103 @@ const App = () => {
     }
   };
 
-  // Enhanced Socket initialization with reconnection logic
+  // Enhanced Socket initialization with better error handling
   const initializeSocket = (token) => {
     setConnectionStatus('connecting');
     
-    socketRef.current = io(BACKEND_URL, {
-      auth: { token },
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000,
-    });
+    try {
+      socketRef.current = io(BACKEND_URL, {
+        auth: { token },
+        transports: ['websocket', 'polling'],
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000,
+      });
 
-    socketRef.current.on('connect', () => {
-      setConnectionStatus('connected');
-      console.log('Connected to server');
-    });
+      socketRef.current.on('connect', () => {
+        setConnectionStatus('connected');
+        console.log('Connected to server');
+      });
 
-    socketRef.current.on('disconnect', (reason) => {
-      setConnectionStatus('disconnected');
-      console.log('Disconnected from server:', reason);
-      
-      // Auto-reconnect for certain disconnect reasons
-      if (reason === 'io server disconnect') {
-        socketRef.current.connect();
-      }
-    });
+      socketRef.current.on('disconnect', (reason) => {
+        setConnectionStatus('disconnected');
+        console.log('Disconnected from server:', reason);
+      });
 
-    socketRef.current.on('connect_error', (error) => {
-      setConnectionStatus('error');
-      console.error('Connection error:', error);
-    });
+      socketRef.current.on('connect_error', (error) => {
+        setConnectionStatus('error');
+        console.error('Connection error:', error);
+        
+        // Check if it's an authentication error
+        if (error.message.includes('auth') || error.message.includes('401')) {
+          console.log('Authentication failed, logging out');
+          handleLogout();
+          alert('Session expired. Please login again.');
+        }
+      });
 
-    socketRef.current.on('reconnect_attempt', (attempt) => {
-      setConnectionStatus(`reconnecting (${attempt}/5)`);
-    });
+      socketRef.current.on('reconnect_attempt', (attempt) => {
+        setConnectionStatus(`reconnecting (${attempt}/5)`);
+      });
 
-    socketRef.current.on('reconnect_failed', () => {
-      setConnectionStatus('failed');
-      alert('Unable to connect to server. Please check your internet connection.');
-    });
+      socketRef.current.on('reconnect_failed', () => {
+        setConnectionStatus('failed');
+        alert('Unable to connect to server. Please check your internet connection.');
+      });
 
-    socketRef.current.on('message', (message) => {
-      setMessages(prev => [...prev, { ...message, isOwn: false }]);
-      
-      // Show notification for new messages when app is in background
-      if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
-        new Notification(`New message from ${selectedUser?.username || 'Someone'}`, {
-          body: message.content.length > 50 ? message.content.substring(0, 50) + '...' : message.content,
-          icon: '/favicon.ico',
-          tag: 'new-message'
+      socketRef.current.on('message', (message) => {
+        setMessages(prev => [...prev, { ...message, isOwn: false }]);
+        
+        // Show notification for new messages when app is in background
+        if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+          new Notification(`New message from ${selectedUser?.username || 'Someone'}`, {
+            body: message.content.length > 50 ? message.content.substring(0, 50) + '...' : message.content,
+            icon: '/favicon.ico',
+            tag: 'new-message'
+          });
+        }
+      });
+
+      socketRef.current.on('user_online', (userId) => {
+        setOnlineUsers(prev => new Set([...prev, userId]));
+      });
+
+      socketRef.current.on('user_offline', (userId) => {
+        setOnlineUsers(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(userId);
+          return newSet;
         });
-      }
-    });
-
-    socketRef.current.on('user_online', (userId) => {
-      setOnlineUsers(prev => new Set([...prev, userId]));
-    });
-
-    socketRef.current.on('user_offline', (userId) => {
-      setOnlineUsers(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(userId);
-        return newSet;
       });
-    });
 
-    socketRef.current.on('typing_start', (data) => {
-      setTypingUsers(prev => new Set([...prev, data.userId]));
-    });
-
-    socketRef.current.on('typing_stop', (data) => {
-      setTypingUsers(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(data.userId);
-        return newSet;
+      socketRef.current.on('typing_start', (data) => {
+        setTypingUsers(prev => new Set([...prev, data.userId]));
       });
-    });
 
-    socketRef.current.on('message_delivered', (data) => {
-      // Update message status if needed
-      console.log('Message delivered:', data);
-    });
+      socketRef.current.on('typing_stop', (data) => {
+        setTypingUsers(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(data.userId);
+          return newSet;
+        });
+      });
 
-    socketRef.current.on('error', (err) => {
-      console.error('Socket error:', err);
-      alert(err.message || 'A connection error occurred');
-    });
+      socketRef.current.on('message_delivered', (data) => {
+        // Update message status if needed
+        console.log('Message delivered:', data);
+      });
+
+      socketRef.current.on('error', (err) => {
+        console.error('Socket error:', err);
+        if (err.message && !err.message.includes('auth')) {
+          alert(err.message || 'A connection error occurred');
+        }
+      });
+
+    } catch (error) {
+      console.error('Socket initialization failed:', error);
+      setConnectionStatus('error');
+    }
   };
 
   // Push notifications
@@ -318,8 +364,20 @@ const App = () => {
       }
 
       const res = await fetch(`${BACKEND_URL}/api/users`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
       });
+
+      // Check if response is JSON
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        console.error('Server returned non-JSON response for users');
+        // Continue with empty users list rather than failing completely
+        setUsers([]);
+        return;
+      }
       
       if (res.ok) {
         const usersData = await res.json();
@@ -333,7 +391,8 @@ const App = () => {
       }
     } catch (error) {
       console.error('Failed to load users:', error);
-      if (error.message !== 'Failed to load users') {
+      // Don't show alert for network errors, just continue with empty list
+      if (error.name !== 'TypeError') {
         alert('Failed to load users. Please check your connection and try again.');
       }
     }
@@ -344,8 +403,19 @@ const App = () => {
     try {
       const token = localStorage.getItem('token');
       const res = await fetch(`${BACKEND_URL}/api/messages/${userId}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
       });
+
+      // Check if response is JSON
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        console.error('Server returned non-JSON response for messages');
+        setMessages([]);
+        return;
+      }
       
       if (res.ok) {
         const messagesData = await res.json();
@@ -361,7 +431,10 @@ const App = () => {
       }
     } catch (error) {
       console.error('Failed to load messages:', error);
-      alert('Failed to load messages. Please try again.');
+      // Don't show alert for network errors
+      if (error.name !== 'TypeError') {
+        alert('Failed to load messages. Please try again.');
+      }
     }
   };
 
@@ -391,6 +464,16 @@ const App = () => {
         receiverId: selectedUser.id,
         content
       });
+      
+      // Remove pending status after a short delay (simulate delivery)
+      setTimeout(() => {
+        setMessages(prev => prev.map(msg => 
+          msg.id === optimisticMessage.id 
+            ? { ...msg, pending: false }
+            : msg
+        ));
+      }, 1000);
+      
     } catch (error) {
       console.error('Failed to send message:', error);
       // Remove optimistic message on error
